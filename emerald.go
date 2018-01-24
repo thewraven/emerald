@@ -9,18 +9,18 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	//	"github.com/fsnotify/fsnotify"
 )
 
 var (
-	fileBuf      bytes.Buffer
 	errBadFormat = errors.New("file is an invalid jade->js")
 	rootDir      = flag.String("dir", os.Getenv("JADE_RENDER"), "directory with jade->js files")
 	gulpTask     = flag.String("gulp", "", "calls 'gulp _task_'")
 	gulpEndTask  = flag.String("gulp-end", "", "calls 'gulp _task_' at the end of emerald execution")
-	parent       = flag.String("watch", "", "directory to watch for changes")
 )
 
 func workDir(root, gulpTask, gulpEndTask string) {
@@ -31,27 +31,31 @@ func workDir(root, gulpTask, gulpEndTask string) {
 	}
 	descriptors, err := ioutil.ReadDir(*rootDir)
 	checkErr(err)
+	wg := sync.WaitGroup{}
+	wg.Add(len(descriptors))
 	for _, descr := range descriptors {
-		if descr.IsDir() {
-			continue
-		}
-		path := *rootDir + "/" + descr.Name()
-		splitNameIdx := strings.LastIndex(descr.Name(), ".")
-		if splitNameIdx != -1 {
-			actualName := descr.Name()[:splitNameIdx]
-			//replace - from file name
-			actualName = strings.Replace(actualName, "-", "_", -1)
-			err = processFile(path, actualName)
-		} else {
-			err = processFile(path, descr.Name())
-		}
-		if err == errBadFormat {
-			//fmt.Printf("Omitting %s, is not a valid jade->js file\n", path)
-			continue
-		}
-		checkErr(err)
-		fmt.Printf("Parse of %s OK\n", path)
+		go func(descr os.FileInfo) {
+			if descr.IsDir() {
+				return
+			}
+			path := filepath.Join(*rootDir, descr.Name())
+			splitNameIdx := strings.LastIndex(descr.Name(), ".")
+			if splitNameIdx != -1 {
+				actualName := descr.Name()[:splitNameIdx]
+				//replace - from file name
+				actualName = strings.Replace(actualName, "-", "_", -1)
+				err = processFile(path, actualName)
+			} else {
+				err = processFile(path, descr.Name())
+			}
+			if err == errBadFormat {
+				return
+			}
+			checkErr(err)
+			wg.Done()
+		}(descr)
 	}
+	wg.Wait()
 	if gulpEndTask != "" {
 		callGulp(gulpEndTask)
 		fmt.Println("Gulp end task completed")
@@ -65,35 +69,9 @@ func main() {
 		fmt.Println("Params: -dir [directory] or $JADE_RENDER must be set")
 		os.Exit(-1)
 	}
+	initial := time.Now()
 	workDir(*rootDir, *gulpTask, *gulpEndTask)
-	if *parent == "" {
-		return
-	}
-	/*	watcher, err := fsnotify.NewWatcher()
-		if err != nil {
-			log.Fatal(err)
-			os.Exit(-1)
-		}
-		defer watcher.Close()
-		wg := new(sync.WaitGroup)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-watcher.Events:
-					workDir(*rootDir, *gulpTask, *gulpEndTask)
-				case err := <-watcher.Errors:
-					log.Println("ERROR", err)
-				}
-			}
-		}()
-		err = watcher.Add(*parent)
-		wg.Wait()
-		if err != nil {
-			log.Fatal(err)
-		}
-		os.Exit(1)*/
+	fmt.Println(time.Since(initial))
 }
 
 func callGulp(task string) {
@@ -113,6 +91,7 @@ func checkErr(err error) {
 }
 
 func processFile(path, fileName string) error {
+	fileBuf := bytes.Buffer{}
 	fileBuf.Reset()
 	f, err := os.Open(path)
 	if err != nil {
@@ -124,14 +103,6 @@ func processFile(path, fileName string) error {
 	}
 	f.Close()
 	content := fileBuf.String()
-	idx := strings.Index(content, `("`)
-	if idx == -1 {
-		return errBadFormat
-	}
-	idx = strings.Index(content, `")`)
-	if idx == -1 {
-		return errBadFormat
-	}
 	content = strings.Replace(content, `("`, "(`", 1)
 	content = strings.Replace(content, `")`, "`)", 1)
 	content = strings.Replace(content, "template(", "template_"+fileName+"(", 1)
